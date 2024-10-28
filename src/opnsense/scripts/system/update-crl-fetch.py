@@ -31,9 +31,25 @@ import ipaddress
 import sys
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.extensions import CRLDistributionPoints
+
+class CustomAdapter(HTTPAdapter):
+    CIPHERS = 'ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512:ed25519:ed448:rsa_pss_pss_sha256:rsa_pss_pss_sha384:' +\
+                'rsa_pss_pss_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512'
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs['ssl_context'] = create_urllib3_context(ciphers=self.CIPHERS)
+        kwargs['ssl_context'].load_verify_locations('/etc/ssl/cert.pem')
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        kwargs['ssl_context'] = create_urllib3_context(ciphers=self.CIPHERS)
+        kwargs['ssl_context'].load_verify_locations('/etc/ssl/cert.pem')
+        return super().proxy_manager_for(*args, **kwargs)
+
 
 def fetch_certs(domains):
     result = []
@@ -48,7 +64,9 @@ def fetch_certs(domains):
         url = 'https://%s' % domain
         try:
             print('# [i] fetch certificate for %s' % url)
-            with requests.get(url, timeout=30, stream=True) as response:
+            s = requests.Session()
+            s.mount(url, CustomAdapter())
+            with s.get(url, timeout=30, stream=True) as response:
                 # XXX: in python > 3.13, replace with sock.get_verified_chain()
                 for cert in response.raw.connection.sock._sslobj.get_verified_chain():
                     result.append(cert.public_bytes(1).encode()) # _ssl.ENCODING_PEM
@@ -77,7 +95,9 @@ def main(domains, target_filename):
                         dp_uri = Distributionpoint.full_name[0].value
                         print("# [i] fetch CRL from %s" % dp_uri)
                         # XXX: only support http for now
-                        response = requests.get(dp_uri)
+                        s = requests.Session()
+                        s.mount(dp_uri, CustomAdapter())
+                        response = s.get(dp_uri)
                         if 200 <= response.status_code <= 299:
                             crl = x509.load_der_x509_crl(response.content)
                             crl_bundle.append(crl.public_bytes(serialization.Encoding.PEM).decode().strip())
